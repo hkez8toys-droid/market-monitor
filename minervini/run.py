@@ -99,8 +99,20 @@ def write_results(client, spreadsheet_id, rows):
     except gspread.WorksheetNotFound:
         ws = book.add_worksheet(title=TAB, rows=5000, cols=len(COLUMNS))
     existing = ws.get_all_values()
-    if existing and existing[0] != COLUMNS:
-        raise ValueError("Minervini header differs; refusing to overwrite data.")
+    # Sheets clients can return padded blank grids rather than [].
+    has_values = any(str(value or "").strip() for row in existing for value in row)
+    if not has_values:
+        existing = []
+    if existing:
+        header = [str(value or "").strip() for value in existing[0]]
+        while header and not header[-1]:
+            header.pop()
+        if header != COLUMNS:
+            raise ValueError(
+                f"Minervini header differs: expected {len(COLUMNS)} columns, "
+                f"found {len(header)}; first headings={header[:5]!r}. "
+                "Existing data preserved; inspect the Minervini worksheet."
+            )
     if not existing:
         ws.update(range_name="A1", values=[COLUMNS])
         ws.freeze(rows=1)
