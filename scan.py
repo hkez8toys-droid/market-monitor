@@ -1,30 +1,33 @@
 """
 Market Monitor — Scan Script
-Modes: eod | evening | premarket
-Run by GitHub Actions on schedule, writes results to Google Sheets.
+
+Date records the date of the returned market-data bar.
+Only the EOD workflow should currently be enabled.
+Evening and premarket retain the original daily-data logic.
 """
 
 import argparse
-import yfinance as yf
-import pandas as pd
-import gspread
-from google.oauth2.service_account import Credentials
-from datetime import date
 import json
 import os
 import time
+from datetime import date
 
-# ── Config ────────────────────────────────────────────────────────────────────
-EOD_MIN_AVG_VOL     = 3_000_000   # 3M avg daily volume for EOD scan
-EVENING_MIN_VOL     = 100_000     # 100k volume for evening scan
-PREMARKET_MIN_VOL   = 50_000      # 50k for pre-market scan
-DAILY_MOVE_PCT      = 4.0         # minimum % move to qualify
-PREMARKET_MOVE_PCT  = 2.0         # lower bar for pre-market
-HEADLINE_MAX_CHARS  = 130         # truncate catalyst headline
+import gspread
+import pandas as pd
+import yfinance as yf
+from google.oauth2.service_account import Credentials
 
-# ── Universe ──────────────────────────────────────────────────────────────────
+
+EOD_MIN_AVG_VOL = 3_000_000
+EVENING_MIN_VOL = 100_000
+PREMARKET_MIN_VOL = 50_000
+DAILY_MOVE_PCT = 4.0
+PREMARKET_MOVE_PCT = 2.0
+HEADLINE_MAX_CHARS = 130
+
+
 def get_universe():
-    """S&P 500 + Nasdaq 100 combined, deduplicated. Hardcoded for reliability."""
+    """Original repository's static ticker list; not a current index membership feed."""
     print("Building ticker universe...")
 
     sp500 = [
@@ -83,79 +86,110 @@ def get_universe():
     ]
 
     unique = list(set(sp500 + nasdaq100))
-    print(f"  Universe size: {len(unique)} tickers")
+    print(f"Universe size: {len(unique)} tickers")
     return unique
 
 
-# ── Google Sheets ─────────────────────────────────────────────────────────────
 def get_gsheet_client():
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
     ]
+
     creds_json = os.environ.get("GOOGLE_CREDENTIALS")
+
     if creds_json:
-        creds = Credentials.from_service_account_info(json.loads(creds_json), scopes=scopes)
+        creds = Credentials.from_service_account_info(
+            json.loads(creds_json),
+            scopes=scopes,
+        )
     else:
-        creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
+        creds = Credentials.from_service_account_file(
+            "credentials.json",
+            scopes=scopes,
+        )
+
     return gspread.authorize(creds)
 
 
 def write_to_sheet(client, spreadsheet_id, tab_name, df):
     sh = client.open_by_key(spreadsheet_id)
+
     try:
         ws = sh.worksheet(tab_name)
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title=tab_name, rows=5000, cols=15)
 
+    expected_header = list(df.columns)
     existing = ws.get_all_values()
+
     if not existing:
-        ws.append_row(list(df.columns), value_input_option="USER_ENTERED")
+        # Write the header explicitly to row 1.
+        ws.update(
+            range_name="A1",
+            values=[expected_header],
+        )
+    elif existing[0] != expected_header:
+        # Stop rather than overwrite existing data.
+        raise ValueError(
+            f"Unexpected header in {tab_name}; "
+            "check row 1 before writing."
+        )
 
-    rows = [[str(v) for v in row] for row in df.values.tolist()]
+    rows = [
+        [str(value) for value in row]
+        for row in df.values.tolist()
+    ]
+
     if rows:
-        ws.append_rows(rows, value_input_option="USER_ENTERED")
-    print(f"  ✓ Wrote {len(rows)} rows → '{tab_name}'")
+        ws.append_rows(
+            rows,
+            value_input_option="USER_ENTERED",
+            table_range="A1",
+        )
+
+    print(f"Wrote {len(rows)} rows -> {tab_name}")
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
 def get_catalyst(ticker):
-    """Fetch top news headline for a ticker from Yahoo Finance."""
+    """Return the top Yahoo headline, which may not explain the price move."""
     try:
         news = yf.Ticker(ticker).news
+
         if news:
             item = news[0]
-            # Handle both old and new yfinance response formats
             title = (
                 item.get("content", {}).get("title")
                 or item.get("title")
                 or ""
             )
             return title[:HEADLINE_MAX_CHARS] if title else "—"
+
     except Exception:
         pass
+
     return "—"
 
 
 def get_company_info(ticker):
-    """Return (short_name, sector) for a ticker."""
     try:
-        info = yf.Ticker(ticker).fast_info
-        # fast_info is lightweight; fall back to full info for sector
         full = yf.Ticker(ticker).info
-        name   = full.get("shortName") or full.get("longName") or ticker
+        name = full.get("shortName") or full.get("longName") or ticker
         sector = full.get("sector") or "—"
         return name, sector
+
     except Exception:
         return ticker, "—"
 
 
-# ── EOD & Evening Scan ────────────────────────────────────────────────────────
 def run_regular_scan(mode, tickers, run_date, client, spreadsheet_id):
-    min_avg_vol = EOD_MIN_AVG_VOL if mode == "eod" else EOD_MIN_AVG_VOL
-    min_today_vol = EOD_MIN_AVG_VOL if mode == "eod" else EVENING_MIN_VOL
+    min_avg_vol = EOD_MIN_AVG_VOL
+    min_today_vol = (
+        EOD_MIN_AVG_VOL if mode == "eod" else EVENING_MIN_VOL
+    )
 
     print(f"Downloading 30-day price data for {len(tickers)} tickers...")
+
     raw = yf.download(
         tickers,
         period="30d",
@@ -167,6 +201,7 @@ def run_regular_scan(mode, tickers, run_date, client, spreadsheet_id):
     )
 
     rows = []
+
     for ticker in tickers:
         try:
             if len(tickers) == 1:
@@ -177,58 +212,87 @@ def run_regular_scan(mode, tickers, run_date, client, spreadsheet_id):
                 df = raw[ticker]
 
             df = df.dropna(subset=["Close", "Volume"])
+
             if len(df) < 5:
                 continue
 
-            avg_vol     = df["Volume"].tail(20).mean()
-            close       = float(df["Close"].iloc[-1])
-            prev_close  = float(df["Close"].iloc[-2])
-            today_vol   = float(df["Volume"].iloc[-1])
-            chg_pct     = (close - prev_close) / prev_close * 100
+            avg_vol = df["Volume"].tail(20).mean()
+            close = float(df["Close"].iloc[-1])
+            prev_close = float(df["Close"].iloc[-2])
+            today_vol = float(df["Volume"].iloc[-1])
+            chg_pct = (close - prev_close) / prev_close * 100
 
-            # Volume filters
             if avg_vol < min_avg_vol:
                 continue
+
             if today_vol < min_today_vol:
                 continue
 
-            # Move filter
             if abs(chg_pct) < DAILY_MOVE_PCT:
                 continue
 
-            vol_ratio   = round(today_vol / avg_vol, 1) if avg_vol > 0 else 0
+            vol_ratio = (
+                round(today_vol / avg_vol, 1)
+                if avg_vol > 0 else 0
+            )
+
             company, sector = get_company_info(ticker)
-            catalyst    = get_catalyst(ticker)
+            catalyst = get_catalyst(ticker)
             time.sleep(0.05)
 
+            # Use the date attached to the actual daily price bar.
+            market_date = pd.Timestamp(
+                df.index[-1]
+            ).strftime("%Y-%m-%d")
+
             rows.append({
-                "Date":       run_date,
-                "Ticker":     ticker,
-                "Company":    company,
-                "Sector":     sector,
-                "Close":      round(close, 2),
-                "Change %":   round(chg_pct, 2),
-                "Volume":     int(today_vol),
+                "Date": market_date,
+                "Ticker": ticker,
+                "Company": company,
+                "Sector": sector,
+                "Close": round(close, 2),
+                "Change %": round(chg_pct, 2),
+                "Volume": int(today_vol),
                 "Avg Volume": int(avg_vol),
-                "Vol Ratio":  vol_ratio,
-                "Direction":  "UP" if chg_pct > 0 else "DOWN",
-                "Catalyst":   catalyst,
+                "Vol Ratio": vol_ratio,
+                "Direction": "UP" if chg_pct > 0 else "DOWN",
+                "Catalyst": catalyst,
             })
 
-        except Exception as e:
+        except Exception as exc:
+            print(f"Skipped {ticker}: {type(exc).__name__}")
             continue
 
     tab = "EOD" if mode == "eod" else "Evening"
-    df_out = pd.DataFrame(rows)
+
+    # Preserve headers even when no stock meets the filters.
+    df_out = pd.DataFrame(rows, columns=[
+        "Date",
+        "Ticker",
+        "Company",
+        "Sector",
+        "Close",
+        "Change %",
+        "Volume",
+        "Avg Volume",
+        "Vol Ratio",
+        "Direction",
+        "Catalyst",
+    ])
+
     if not df_out.empty:
         df_out = df_out.sort_values("Change %", ascending=False)
-    print(f"  Found {len(rows)} qualifying movers")
+
+    print(f"Found {len(rows)} qualifying movers")
     write_to_sheet(client, spreadsheet_id, tab, df_out)
 
 
-# ── Pre-Market Scan ───────────────────────────────────────────────────────────
 def run_premarket_scan(tickers, run_date, client, spreadsheet_id):
-    print(f"Downloading pre/after-hours data for {len(tickers)} tickers...")
+    # Original daily-bar implementation.
+    # This is not yet a validated premarket scanner.
+    print("WARNING: Premarket logic still uses daily bars.")
+    print(f"Downloading data for {len(tickers)} tickers...")
+
     raw = yf.download(
         tickers,
         period="5d",
@@ -241,6 +305,7 @@ def run_premarket_scan(tickers, run_date, client, spreadsheet_id):
     )
 
     rows = []
+
     for ticker in tickers:
         try:
             if len(tickers) == 1:
@@ -251,68 +316,112 @@ def run_premarket_scan(tickers, run_date, client, spreadsheet_id):
                 df = raw[ticker]
 
             df = df.dropna(subset=["Close", "Volume"])
+
             if len(df) < 2:
                 continue
 
-            close       = float(df["Close"].iloc[-1])
-            prev_close  = float(df["Close"].iloc[-2])
-            vol         = float(df["Volume"].iloc[-1])
-            chg_pct     = (close - prev_close) / prev_close * 100
+            close = float(df["Close"].iloc[-1])
+            prev_close = float(df["Close"].iloc[-2])
+            vol = float(df["Volume"].iloc[-1])
+            chg_pct = (close - prev_close) / prev_close * 100
 
             if vol < PREMARKET_MIN_VOL:
                 continue
+
             if abs(chg_pct) < PREMARKET_MOVE_PCT:
                 continue
 
             company, sector = get_company_info(ticker)
-            catalyst    = get_catalyst(ticker)
+            catalyst = get_catalyst(ticker)
             time.sleep(0.05)
 
+            market_date = pd.Timestamp(
+                df.index[-1]
+            ).strftime("%Y-%m-%d")
+
             rows.append({
-                "Date":           run_date,
-                "Ticker":         ticker,
-                "Company":        company,
-                "Sector":         sector,
-                "Pre-Mkt Price":  round(close, 2),
-                "Change %":       round(chg_pct, 2),
-                "Volume":         int(vol),
-                "Direction":      "UP" if chg_pct > 0 else "DOWN",
-                "Catalyst":       catalyst,
+                "Date": market_date,
+                "Ticker": ticker,
+                "Company": company,
+                "Sector": sector,
+                "Pre-Mkt Price": round(close, 2),
+                "Change %": round(chg_pct, 2),
+                "Volume": int(vol),
+                "Direction": "UP" if chg_pct > 0 else "DOWN",
+                "Catalyst": catalyst,
             })
 
-        except Exception:
+        except Exception as exc:
+            print(f"Skipped {ticker}: {type(exc).__name__}")
             continue
 
-    df_out = pd.DataFrame(rows)
+    df_out = pd.DataFrame(rows, columns=[
+        "Date",
+        "Ticker",
+        "Company",
+        "Sector",
+        "Pre-Mkt Price",
+        "Change %",
+        "Volume",
+        "Direction",
+        "Catalyst",
+    ])
+
     if not df_out.empty:
         df_out = df_out.sort_values("Change %", ascending=False)
-    print(f"  Found {len(rows)} pre-market movers")
+
+    print(f"Found {len(rows)} qualifying movers")
     write_to_sheet(client, spreadsheet_id, "PreMarket", df_out)
 
 
-# ── Entry Point ───────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["eod", "evening", "premarket"], required=True,
-                        help="Which scan to run")
-    args = parser.parse_args()
 
+    parser.add_argument(
+        "--mode",
+        choices=["eod", "evening", "premarket"],
+        required=True,
+        help="Which scan to run",
+    )
+
+    args = parser.parse_args()
     run_date = date.today().strftime("%Y-%m-%d")
-    print(f"\n=== Market Monitor [{args.mode.upper()}] | {run_date} ===\n")
+
+    print(
+        f"\n=== Market Monitor [{args.mode.upper()}] "
+        f"| Execution date: {run_date} ===\n"
+    )
 
     spreadsheet_id = os.environ.get("SPREADSHEET_ID")
+
     if not spreadsheet_id:
-        raise ValueError("SPREADSHEET_ID environment variable is not set.")
+        raise ValueError(
+            "SPREADSHEET_ID environment variable is not set."
+        )
 
     tickers = get_universe()
-    client  = get_gsheet_client()
+    client = get_gsheet_client()
 
     if args.mode in ("eod", "evening"):
-        run_regular_scan(args.mode, tickers, run_date, client, spreadsheet_id)
-    else:
-        run_premarket_scan(tickers, run_date, client, spreadsheet_id)
+        if args.mode == "evening":
+            print("WARNING: Evening logic still uses daily bars.")
 
-    print(f"\n✅ {args.mode.upper()} scan complete.\n")
+        run_regular_scan(
+            args.mode,
+            tickers,
+            run_date,
+            client,
+            spreadsheet_id,
+        )
+    else:
+        run_premarket_scan(
+            tickers,
+            run_date,
+            client,
+            spreadsheet_id,
+        )
+
+    print(f"\n{args.mode.upper()} scan complete.\n")
 
 
 if __name__ == "__main__":
