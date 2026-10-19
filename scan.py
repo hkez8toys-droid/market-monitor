@@ -2,8 +2,8 @@
 Market Monitor — Scan Script
 
 Date records the date of the returned market-data bar.
-Only the EOD workflow should currently be enabled.
-Evening and premarket retain the original daily-data logic.
+EOD uses daily bars. Evening retains legacy daily-data logic.
+Premarket validation now uses the separate premarket_check.py workflow.
 """
 
 import argparse
@@ -288,90 +288,11 @@ def run_regular_scan(mode, tickers, run_date, client, spreadsheet_id):
 
 
 def run_premarket_scan(tickers, run_date, client, spreadsheet_id):
-    # Original daily-bar implementation.
-    # This is not yet a validated premarket scanner.
-    print("WARNING: Premarket logic still uses daily bars.")
-    print(f"Downloading data for {len(tickers)} tickers...")
-
-    raw = yf.download(
-        tickers,
-        period="5d",
-        interval="1d",
-        group_by="ticker",
-        auto_adjust=True,
-        threads=True,
-        progress=False,
-        prepost=True,
+    raise RuntimeError(
+        "Legacy daily-bar premarket scanning is disabled. "
+        "Use the PreMarket - Minute Data Check workflow / premarket_check.py "
+        "with requirements_premarket.txt installed."
     )
-
-    rows = []
-
-    for ticker in tickers:
-        try:
-            if len(tickers) == 1:
-                df = raw
-            else:
-                if ticker not in raw.columns.get_level_values(0):
-                    continue
-                df = raw[ticker]
-
-            df = df.dropna(subset=["Close", "Volume"])
-
-            if len(df) < 2:
-                continue
-
-            close = float(df["Close"].iloc[-1])
-            prev_close = float(df["Close"].iloc[-2])
-            vol = float(df["Volume"].iloc[-1])
-            chg_pct = (close - prev_close) / prev_close * 100
-
-            if vol < PREMARKET_MIN_VOL:
-                continue
-
-            if abs(chg_pct) < PREMARKET_MOVE_PCT:
-                continue
-
-            company, sector = get_company_info(ticker)
-            catalyst = get_catalyst(ticker)
-            time.sleep(0.05)
-
-            market_date = pd.Timestamp(
-                df.index[-1]
-            ).strftime("%Y-%m-%d")
-
-            rows.append({
-                "Date": market_date,
-                "Ticker": ticker,
-                "Company": company,
-                "Sector": sector,
-                "Pre-Mkt Price": round(close, 2),
-                "Change %": round(chg_pct, 2),
-                "Volume": int(vol),
-                "Direction": "UP" if chg_pct > 0 else "DOWN",
-                "Catalyst": catalyst,
-            })
-
-        except Exception as exc:
-            print(f"Skipped {ticker}: {type(exc).__name__}")
-            continue
-
-    df_out = pd.DataFrame(rows, columns=[
-        "Date",
-        "Ticker",
-        "Company",
-        "Sector",
-        "Pre-Mkt Price",
-        "Change %",
-        "Volume",
-        "Direction",
-        "Catalyst",
-    ])
-
-    if not df_out.empty:
-        df_out = df_out.sort_values("Change %", ascending=False)
-
-    print(f"Found {len(rows)} qualifying movers")
-    write_to_sheet(client, spreadsheet_id, "PreMarket", df_out)
 
 
 def main():
