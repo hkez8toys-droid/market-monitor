@@ -1,25 +1,39 @@
-name: Scan — Pre-Market (8:00 AM ET)
+name: PreMarket - Minute Data Check (manual test)
 
 on:
-  schedule:
-    - cron: "0 13 * * 1-5"    # 13:00 UTC = 8:00 AM ET (EST). Adjust for EDT.
   workflow_dispatch:
+    inputs:
+      scope:
+        description: "watchlist = EOD + Minervini; probe = AAPL/MSFT/SPY only"
+        type: choice
+        default: watchlist
+        options:
+          - watchlist
+          - probe
+
+permissions:
+  contents: read
+
+concurrency:
+  group: premarket-check-sheet-writer
+  cancel-in-progress: false
 
 jobs:
-  premarket-scan:
-    runs-on: ubuntu-latest
+  premarket-check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Run Pre-Market scan
+        run: python -m pip install -r requirements_premarket.txt
+      - name: Verify session and data-quality checks
+        run: python -m unittest test_premarket_check -v
+      - name: Check premarket minute bars and save diagnostic snapshot
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
-        run: python scan.py --mode premarket
+          CHECK_SCOPE: ${{ inputs.scope }}
+        run: python -u premarket_check.py --scope "$CHECK_SCOPE"
