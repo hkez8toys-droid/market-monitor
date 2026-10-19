@@ -1,0 +1,2 @@
+-r minervini/requirements.txt
+pandas-market-calendars>=5,<6
