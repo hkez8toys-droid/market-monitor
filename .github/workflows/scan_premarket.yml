@@ -1,6 +1,9 @@
-name: PreMarket - Minute Data Check (manual test)
+name: PreMarket - Minute Data Check (20:55 HKT)
 
 on:
+  schedule:
+    # UTC 12:55 = Hong Kong 20:55, Monday-Friday.
+    - cron: "55 12 * * 1-5"
   workflow_dispatch:
     inputs:
       scope:
@@ -35,5 +38,5 @@ jobs:
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
-          CHECK_SCOPE: ${{ inputs.scope }}
+          CHECK_SCOPE: ${{ github.event_name == 'schedule' && 'probe' || inputs.scope || 'probe' }}
         run: python -u premarket_check.py --scope "$CHECK_SCOPE"
