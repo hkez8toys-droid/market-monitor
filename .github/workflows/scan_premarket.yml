@@ -1,9 +1,9 @@
-name: PreMarket - Minute Data Check (20:55 HKT)
+name: PreMarket - Minute Data Check (20:15 HKT)
 
 on:
   schedule:
-    # UTC 12:55 = Hong Kong 20:55, Monday-Friday.
-    - cron: "55 12 * * 1-5"
+    # UTC 12:15 = Hong Kong 20:15, Monday-Friday.
+    - cron: "15 12 * * 1-5"
   workflow_dispatch:
     inputs:
       scope:
